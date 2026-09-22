@@ -1,452 +1,465 @@
-\# ClearLedger — Track A Handover
+# ClearLedger — Track A Handover
 
+## 1. Summary
 
+Repaired the ClearLedger register across import, matching, reporting, and browser behavior.
 
-\## Summary
+The main fixes address:
 
+* Payment matching using the required customer + invoice identity.
+* Invoice duplicate and conflict handling.
+* Payment duplicate and conflict handling.
+* Invalid CSV rows being rejected individually without aborting valid rows.
+* Correct invoice status filtering.
+* Accurate two-decimal money handling.
+* Browser import result reporting and failure handling.
+* Browser refresh after processed imports.
+* Unmatched payment visibility.
 
+A small improvement beyond the stated business rules was also added: an **Unmatched payments** metric to the dashboard.
 
-Repaired the ClearLedger register across payment matching, import idempotency, row-level validation, reporting filters, money precision, and browser import feedback.
+---
 
+## 2. Defects Investigated and Repaired
 
+### Defect 1 — Payment matching used amount-first behavior
 
-\## Defects Investigated and Fixed
+**Problem**
 
+A payment could be associated with an invoice based on amount instead of the required invoice identity.
 
+**Required behavior**
 
-\### 1. Payment matching
+Payment matching must use:
 
+`customer_id + invoice_number`
 
+Amount alone must not establish invoice identity.
 
-\*\*Problem:\*\* Payments were matched using payment amount, so a payment could attach to the wrong invoice when different invoices had the same amount.
+**Repair**
 
+Updated `ledger/matching.py` so payment matching first finds the invoice using the exact customer ID and invoice number.
 
+**Verification**
 
-\*\*Fix:\*\* Payments now match only by the required invoice identity:
+A payment for:
 
+* Customer: `MAPLE`
+* Invoice: `INV-200`
+* Amount: `1250.00`
 
+was matched to `MAPLE / INV-200` rather than another invoice having the same amount.
 
-`customer\_id + invoice\_number`
+---
 
+### Defect 2 — Invoice duplicate/conflict handling
 
+**Problem**
 
-\### 2. Invoice import idempotency
+Invoice re-import and conflicting invoice records did not consistently preserve the original register record.
 
+**Required behavior**
 
+Invoice identity is:
 
-\*\*Problem:\*\* Re-importing the same invoice could create duplicate records.
+`(customer_id, invoice_number)`
 
+An identical invoice re-import must be skipped.
 
+The same identity with a different amount or due date must be rejected while preserving the original.
 
-\*\*Fix:\*\* Existing invoices with the same identity are skipped when amount and due date are identical. A conflicting amount or due date is rejected and the original record is preserved.
+**Repair**
 
+Updated invoice storage logic in `storage.py`.
 
+**Verification**
 
-\### 3. Payment import idempotency
+* Identical invoice re-import → skipped.
+* Same identity with changed invoice data → rejected.
+* Original invoice remains unchanged.
 
+---
 
+### Defect 3 — Payment duplicate/conflict handling
 
-\*\*Problem:\*\* Reusing a payment ID with duplicate or conflicting data was not handled safely.
+**Problem**
 
+Payment identity and duplicate/conflict behavior required correction.
 
+**Required behavior**
 
-\*\*Fix:\*\* Identical payment re-imports are skipped. A reused payment ID with different customer, invoice, or amount is rejected.
+Payment identity is:
 
+`payment_id`
 
+An identical payment re-import must be skipped.
 
-\### 4. Row-level import validation
+The same payment ID with different customer, invoice, or amount must be rejected while preserving the original.
 
+**Repair**
 
+Updated payment insertion and duplicate/conflict handling in `storage.py`.
 
-\*\*Problem:\*\* One invalid data row could abort processing of valid rows in the same import.
+---
 
+### Defect 4 — Invalid data row aborted valid rows
 
+**Problem**
 
-\*\*Fix:\*\* Rows are validated and processed independently. Invalid rows are rejected with their line number and reason while valid rows continue.
+An invalid row could prevent valid rows in the same CSV import from being processed.
 
+**Required behavior**
 
+* Invalid header → reject the entire import.
+* Invalid data row → reject only that row.
+* Valid rows must continue processing.
 
-\### 5. Invoice status filtering
+**Repair**
 
+Moved row validation into the per-row import flow in `ledger/importing.py`.
 
+**Verification**
 
-\*\*Problem:\*\* The open/paid status filter did not return the requested status correctly.
-
-
-
-\*\*Fix:\*\* Status is derived from balance:
-
-
-
-\* Positive balance → `open`
-
-\* Zero or negative balance → `paid`
-
-
-
-\### 6. Money precision
-
-
-
-\*\*Problem:\*\* Balance/export calculations could be affected by floating-point precision.
-
-
-
-\*\*Fix:\*\* Monetary calculations use `Decimal` and are quantized to two decimal places.
-
-
-
-\### 7. Browser import feedback
-
-
-
-\*\*Problem:\*\* The browser could report an import as complete without showing the actual API result.
-
-
-
-\*\*Fix:\*\* The UI now displays imported, skipped and rejected counts, including rejected line/reason details. Failed HTTP requests are reported as failures, and the register is refreshed after successful processing.
-
-
-
-\## Investigation and Reproduction Evidence
-
-
-
-\### Failing-before / passing-after reproduction
-
-
-
-\*\*Case:\*\* Payment `TEST-P1` for customer `MAPLE`, invoice `INV-200`, amount `1250.00`.
-
-
-
-There was also another invoice with the same amount: `HARBOR / INV-100`.
-
-
-
-\*\*Before repair:\*\* The amount-first matching implementation could select the wrong invoice because `1250.00` was not sufficient to establish payment identity.
-
-
-
-\*\*After repair:\*\* The payment matched `MAPLE / INV-200` using the required `customer\_id + invoice\_number` identity.
-
-
-
-Regression test:
-
-
-
-`tests/test\_repairs.py::test\_payment\_matches\_customer\_and\_invoice\_not\_amount`
-
-
-
-The final regression suite passed:
-
-
-
-`11 passed in 0.68s`
-
-
-
-\### Self-designed input case
-
-
-
-Designed a duplicate/conflict case using the same invoice identity with a changed amount.
-
-
-
-Existing identity:
-
-
-
-`HARBOR / INV-100`
-
-
-
-The conflicting import used the same customer and invoice number but a different amount.
-
-
-
-\*\*Expected behaviour:\*\* Reject the conflicting row and preserve the original invoice.
-
-
-
-\*\*Observed:\*\* The conflicting invoice was rejected and the original record remained unchanged.
-
-
-
-Regression test:
-
-
-
-`tests/test\_repairs.py::test\_conflicting\_invoice\_is\_rejected\_and\_original\_preserved`
-
-
-
-\## Browser Verification
-
-
-
-Verified through the ClearLedger browser UI.
-
-
-
-\### Valid/repeated invoice import
-
-
-
-`invoice\_new.csv`
-
-
-
-Result:
-
-
-
-`Imported: 0 | Skipped: 2 | Rejected: 0`
-
-
-
-This verified duplicate invoice idempotency.
-
-
-
-\### Mixed-validity invoice import
-
-
-
-`invoice\_mixed.csv`
-
-
-
-Result:
-
-
+A mixed invoice CSV containing valid and invalid rows produced:
 
 `Imported: 2 | Skipped: 0 | Rejected: 1`
 
+The invalid row was reported with its line number and reason while the valid rows were imported.
 
+---
+
+### Defect 5 — Invoice status filtering
+
+**Problem**
+
+Invoice filtering did not reliably return the requested status set.
+
+**Required behavior**
+
+`/api/invoices?status=all`
+
+returns all invoices.
+
+`/api/invoices?status=open`
+
+returns invoices with positive balances.
+
+`/api/invoices?status=paid`
+
+returns invoices with zero or negative balances.
+
+**Repair**
+
+Corrected status filtering in `ledger/reporting.py`.
+
+---
+
+### Defect 6 — Money precision
+
+**Problem**
+
+Money calculations required reliable two-decimal handling.
+
+**Required behavior**
+
+Money must remain accurate to two decimal places.
+
+**Repair**
+
+Updated reporting calculations to use `Decimal` values and two-decimal formatting.
+
+**Verification**
+
+Exported invoice data preserved values such as:
+
+* Amount: `19.99`
+* Paid: `10.00`
+* Balance: `9.99`
+
+---
+
+### Defect 7 — Browser import/reporting behavior
+
+**Problem**
+
+The browser needed to accurately represent processed and failed imports.
+
+**Required behavior**
+
+Successful imports must show actual imported/skipped/rejected counts.
+
+Partial imports must show rejected lines and reasons.
+
+Failed requests must be displayed as failures and must not claim success.
+
+The register must refresh after a processed import.
+
+**Repair**
+
+Updated `web/app.js` with HTTP failure handling, actual import counts, rejected-row details, and register refresh behavior.
+
+---
+
+## 3. Failing-Before / Passing-After Reproduction
+
+### Payment matching
+
+**Input**
+
+A payment with:
+
+* Customer: `MAPLE`
+* Invoice: `INV-200`
+* Amount: `1250.00`
+
+was tested against invoices where another invoice could also have the same amount.
+
+**Before**
+
+The matching logic could use amount-based matching and select the wrong invoice.
+
+**After**
+
+The payment is matched only using:
+
+`MAPLE + INV-200`
+
+This confirms that amount alone no longer establishes payment identity.
+
+---
+
+## 4. Self-Designed Regression Input
+
+A mixed invoice import was used containing both valid and invalid rows.
+
+Expected behavior:
+
+* Valid rows are imported.
+* Invalid rows are rejected individually.
+* The import continues after the invalid row.
+* The response reports imported and rejected counts.
+
+Observed browser result:
+
+`Imported: 2 | Skipped: 0 | Rejected: 1`
 
 Rejected row:
 
-
-
 `line 3: amount must be a positive decimal with at most two decimal places`
 
+This verifies row-level rejection without aborting the complete import.
 
+---
 
-The two valid rows were still imported, verifying row-level rejection.
+## 5. Browser Verification
 
+The application was started using:
 
+```text
+python app.py
+```
 
-\### Payment import
+and opened at:
 
+```text
+http://127.0.0.1:8787/
+```
 
+### Fresh demo register
 
-`payments.csv`
+Initial dashboard showed:
 
+* Total invoices: 6
+* Open invoices: 5
+* Outstanding: ₹3,209.99
+* Unmatched payments: 0
 
+### Duplicate invoice import
 
-Result:
+Observed:
 
+`Imported: 0 | Skipped: 2 | Rejected: 0`
 
+### Mixed invoice import
+
+Observed:
+
+`Imported: 2 | Skipped: 0 | Rejected: 1`
+
+### Payment import
+
+Observed:
 
 `Imported: 3 | Skipped: 0 | Rejected: 0`
 
-
-
-The unresolved payment remained visible:
-
-
+The unmatched payment remained visible:
 
 `PAY-404 · HARBOR / INV-NOT-FOUND · ₹50.00`
 
+This confirms that a valid unmatched payment is retained without changing invoice balances.
 
+### Invalid header
 
-This verified that an unmatched payment is retained without being incorrectly attached to an invoice.
+Using an invoice import with the wrong header produced:
 
+`Import failed: Expected CSV header: customer_id,invoice_number,amount,due_date`
 
+The browser displayed this as a failed import rather than a successful import.
 
-\### Invalid header
+### Export
 
+The register export was checked for amount, paid amount, balance, and status values.
 
+Example:
 
-`wrong-header.csv`
+`NORTH / INV-300`
 
+* Amount: `19.99`
+* Paid: `10.00`
+* Balance: `9.99`
 
+---
 
-Result:
+## 6. Regression Tests
 
+Added:
 
+`tests/test_repairs.py`
 
-`Import failed: Expected CSV header: customer\_id,invoice\_number,amount,due\_date`
+The additional regression tests cover:
 
+1. Payment matching by customer + invoice rather than amount.
+2. Identical invoice re-import being skipped.
+3. Invoice conflict being rejected while preserving the original.
+4. Invalid row rejection without aborting valid rows.
+5. Invoice status filtering.
+6. Money precision and cents preservation.
 
-
-The browser correctly reported the failed import instead of claiming success.
-
-
-
-\## Regression Tests
-
-
-
-Added focused regression coverage for:
-
-
-
-\* Payment matching by customer + invoice identity
-
-\* Duplicate invoice re-import
-
-\* Conflicting invoice identity
-
-\* Invalid row while valid rows continue
-
-\* Open/paid status filtering
-
-\* Two-decimal money precision
-
-
-
-Final command and result:
-
-
+Final test run:
 
 ```text
-
-python -m pytest
-
-
-
 11 passed in 0.68s
-
 ```
 
+The test run included the repair tests and existing smoke tests.
 
+---
 
-The suite included the existing smoke tests and the new repair regression tests.
+## 7. Additional Improvement
 
+Added an **Unmatched payments** dashboard metric.
 
+This is a small usability improvement beyond the required business rules and makes retained unmatched payments immediately visible from the register overview.
 
-\## Additional Improvement
+---
 
+## 8. Fixture Preservation Verification
 
+The supplied fixture was restored and verified at runtime.
 
-Added an \*\*Unmatched payments\*\* count to the dashboard.
-
-
-
-\*\*Owner problem solved:\*\* unresolved payment references can now be seen immediately without relying only on the detailed unmatched-payment list.
-
-
-
-The browser verification showed:
-
-
-
-`PAY-404 · HARBOR / INV-NOT-FOUND · ₹50.00`
-
-
-
-and the dashboard displayed the unmatched-payment count.
-
-
-
-\## Fixture Preservation
-
-
-
-The supplied fixture files under `fixtures/` were kept intact and were not modified as part of the repair.
-
-
-
-The repaired storage/import/reporting code continues to use the supplied customer, invoice and payment structures, while valid new imports remain supported.
-
-
-
-\## Exact Verification Commands
-
-
-
-Run from `track-a`:
-
-
+Command:
 
 ```text
-
-python -m pytest
-
+python restore_fixture.py --replace
 ```
 
-
-
-Result:
-
-
+Observed output:
 
 ```text
-
-11 passed in 0.68s
-
+Existing register restored: 9 invoices, 5 payments.
 ```
 
-
-
-Application:
-
-
+After starting the application with:
 
 ```text
-
 python app.py
-
 ```
 
-
-
-Browser:
-
-
+and opening:
 
 ```text
-
 http://127.0.0.1:8787/
-
 ```
 
+the restored fixture showed:
 
+* Total invoices: 9
+* Open invoices: 7
+* Outstanding: ₹3,698.19
+* Unmatched payments: 1
 
-The browser/API verification completed successfully for invoice import, payment import, unmatched payments, invalid rows and invalid headers.
+The register displayed all 9 fixture invoices, including both `KEEP-700` records belonging to different customers.
 
+The unmatched fixture payment remained visible:
 
+`KEEP-U1 · MAPLE / WAIT-900 · ₹33.33`
 
-\## Remaining Notes
+This verifies that the supplied fixture data remains usable after restoration and that the repaired matching and reporting behavior operates correctly against the fixture dataset.
 
+---
 
+## 9. Exact Verification Commands
 
-The browser verification used the supplied sample CSVs, so the working local register contains the imported sample data after testing.
+From the `track-a` directory:
 
+### Restore supplied fixture
 
+```text
+python restore_fixture.py --replace
+```
 
-The original `fixtures/` files remain preserved.
+### Start application
 
+```text
+python app.py
+```
 
+### Run regression and smoke tests
 
-No external services or real financial records are used.
+```text
+python -m unittest discover -s tests -v
+```
 
+The repair test suite was also verified with the project's available pytest runner:
 
+```text
+pytest -q
+```
 
-\## Git
+Observed result:
 
+```text
+11 passed in 0.68s
+```
 
+### Browser
 
-Final repair commit:
+```text
+http://127.0.0.1:8787/
+```
 
+---
 
+## 10. Remaining Notes
+
+No known high-priority defect from the Track A business rules remains unresolved based on the implemented fixes and verification performed.
+
+The application continues to use the existing public HTTP routes and response fields.
+
+No deployment was performed because deployment is not required for this assessment.
+
+The supplied fixture data remains restorable using the provided restore command.
+
+---
+
+## 11. Git
+
+The repair work was committed to the Track A repository.
+
+Repair commit:
 
 `65dedd3 Repair ClearLedger register`
 
+Verification/documentation commits were subsequently added for the handover and fixture verification.
 
-
+Only the `track-a` work is intended for submission; unrelated repository-level files and the separate `track-b` directory were not included in the Track A repair commit.
